@@ -169,11 +169,12 @@ const page = `<!DOCTYPE html>
       <option value="1:1">مربع 1:1</option>
     </select>
     <select id="seconds">
+      <option value="" selected>تلقائي (اختياري)</option>
       <option value="5">5 ثوانٍ</option>
       <option value="10">10 ثوانٍ</option>
       <option value="20">20 ثانية</option>
       <option value="30">30 ثانية</option>
-      <option value="60" selected>60 ثانية (الأقصى)</option>
+      <option value="60">60 ثانية (الأقصى)</option>
     </select>
   </div>
   <button id="go">ولّد الفيديو</button>
