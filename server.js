@@ -450,11 +450,25 @@ const server = http.createServer(async (req, res) => {
       const secondsNum = Math.min(60, Math.max(4, parseInt(body.seconds, 10) || 5));
       const seconds = String(Math.min(12, secondsNum));
       if (imageData) {
-        if (!MAGIC_HOUR_API_KEY) return sendJson(res, 200, { error: "تحريك الصور غير مهيأ حالياً." });
         const m = imageData.match(/^data:image\/([a-z0-9.+-]+);base64,(.+)$/i);
         if (!m) return sendJson(res, 200, { error: "الصورة غير صالحة." });
         const ext = m[1].toLowerCase().replace("jpeg", "jpg");
         const bytes = Buffer.from(m[2], "base64");
+        if (AGNES_API_KEY) {
+          try {
+            const uploadId = "imgup-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+            mediaStore.set(uploadId, { bytes, type: "image/" + (ext === "jpg" ? "jpeg" : ext) });
+            while (mediaStore.size > 8) mediaStore.delete(mediaStore.keys().next().value);
+            const imageUrl = `https://${req.headers.host}/api/media/${encodeURIComponent(uploadId)}`;
+            const created = await agnes("/v1/videos", {
+              method: "POST",
+              body: JSON.stringify({ model: MODEL, prompt: prompt || "Animate this image naturally with gentle motion", image: imageUrl, size: "720P", aspect_ratio: aspect, seconds, n: 1 }),
+            });
+            const videoId = created?.video_id || created?.id || created?.data?.video_id;
+            if (videoId) return sendJson(res, 200, { videoId });
+          } catch {}
+        }
+        if (!MAGIC_HOUR_API_KEY) return sendJson(res, 200, { error: "تحريك الصور غير مهيأ حالياً." });
         const up = await magicHour("/v1/files/upload-urls", { method: "POST", body: JSON.stringify({ items: [{ type: "image", extension: ext }] }) });
         const item = up?.items?.[0];
         if (!item?.upload_url || !item?.file_path) return sendJson(res, 200, { error: "تعذر رفع الصورة." });
@@ -462,7 +476,14 @@ const server = http.createServer(async (req, res) => {
         if (!put.ok) return sendJson(res, 200, { error: "تعذر رفع الصورة." });
         const mhBody = { end_seconds: secondsNum, assets: { image_file_path: item.file_path }, model: "ltx-2.5", resolution: "480p", audio: true };
         if (prompt) mhBody.style = { prompt };
-        const mh = await magicHour("/v1/image-to-video", { method: "POST", body: JSON.stringify(mhBody) });
+        let mh;
+        try {
+          mh = await magicHour("/v1/image-to-video", { method: "POST", body: JSON.stringify(mhBody) });
+        } catch (err) {
+          const em = String(err?.message || err).toLowerCase();
+          if (!(em.includes("402") || em.includes("credit") || em.includes("insufficient"))) throw err;
+          mh = await magicHour("/v1/image-to-video", { method: "POST", body: JSON.stringify({ ...mhBody, end_seconds: 3 }) });
+        }
         if (!mh?.id) return sendJson(res, 200, { error: "تعذر بدء التوليد." });
         return sendJson(res, 200, { videoId: "mh-" + mh.id });
       }
@@ -496,12 +517,12 @@ const server = http.createServer(async (req, res) => {
           } catch (err) {
             lastErr = err;
             const em = String(err?.message || err).toLowerCase();
-            if ((em.includes("402") || em.includes("credit") || em.includes("insufficient")) && secondsNum > 4) {
+            if ((em.includes("402") || em.includes("credit") || em.includes("insufficient")) && secondsNum > 3) {
               try {
                 const mhAspect = ["16:9", "9:16", "1:1"].includes(aspect) ? aspect : "16:9";
                 const mh = await magicHour("/v1/text-to-video", {
                   method: "POST",
-                  body: JSON.stringify({ end_seconds: 4, style: { prompt }, aspect_ratio: mhAspect, model: "ltx-2.5", resolution: "480p", audio: true }),
+                  body: JSON.stringify({ end_seconds: 3, style: { prompt }, aspect_ratio: mhAspect, model: "ltx-2.5", resolution: "480p", audio: true }),
                 });
                 if (mh?.id) return sendJson(res, 200, { videoId: "mh-" + mh.id });
               } catch (err2) {
