@@ -211,6 +211,17 @@ $("image").onchange = () => {
   r.onload = () => { imageData = r.result; $("preview").src = imageData; $("preview").style.display = "block"; };
   r.readAsDataURL(f);
 };
+async function translateClient(prompt) {
+  if (!/[\u0600-\u06FF]/.test(prompt)) return prompt;
+  try {
+    const r = await fetch("https://api.mymemory.translated.net/get?q=" + encodeURIComponent(prompt) + "&langpair=ar|en");
+    const j = await r.json();
+    const t = j && j.responseData && j.responseData.translatedText;
+    return t && !/INVALID|QUERY LENGTH|MYMEMORY WARNING/i.test(t) ? t : prompt;
+  } catch {
+    return prompt;
+  }
+}
 async function poll(id) {
   for (let i = 0; i < 160; i++) {
     const r = await fetch("/api/video/" + encodeURIComponent(id));
@@ -254,7 +265,7 @@ $("goimg").onclick = async () => {
   $("goimg").disabled = true;
   $("status").textContent = "جارٍ توليد الصورة…";
   try {
-    const r = await fetch("/api/image", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, aspect: $("aspect").value }) });
+    const r = await fetch("/api/image", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: await translateClient(prompt), aspect: $("aspect").value }) });
     const j = await r.json();
     if (!j.url) throw new Error(j.error || "تعذر توليد الصورة.");
     $("outimg").src = j.url;
@@ -276,7 +287,7 @@ $("editimg").onclick = async () => {
   $("editimg").disabled = true;
   $("status").textContent = "جارٍ تعديل الصورة…";
   try {
-    const r = await fetch("/api/image-edit", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, imageData }) });
+    const r = await fetch("/api/image-edit", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: await translateClient(prompt), imageData }) });
     const j = await r.json();
     if (!j.url) throw new Error(j.error || "تعذر تعديل الصورة.");
     $("outimg").src = j.url;
