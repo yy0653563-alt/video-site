@@ -4,6 +4,11 @@ const PORT = process.env.PORT || 3000;
 const AGNES_API_KEY = process.env.AGNES_API_KEY || "";
 const AGNES_BASE = process.env.AGNES_BASE_URL || "https://apihub.agnes-ai.com";
 const MODEL = "agnes-video-2.5-flash";
+const POLLINATIONS_API_KEY = process.env.POLLINATIONS_API_KEY || "";
+const POLLINATIONS_BASE = process.env.POLLINATIONS_BASE_URL || "https://gen.pollinations.ai";
+const mediaStore = new Map();
+const mediaErrors = new Map();
+const mediaPending = new Set();
 
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
@@ -35,11 +40,28 @@ async function agnes(path, options = {}) {
   return json;
 }
 
+async function pollinationsVideo(prompt, aspect) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 240000);
+  try {
+    const res = await fetch(`${POLLINATIONS_BASE}/video/${encodeURIComponent(prompt)}?model=alibaba/wan-2.2-fast&duration=5&aspectRatio=${encodeURIComponent(aspect)}`, {
+      headers: { Authorization: `Bearer ${POLLINATIONS_API_KEY}` },
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`Pollinations ${res.status}`);
+    const type = res.headers.get("content-type") || "";
+    if (!type.includes("video")) throw new Error("Pollinations did not return video");
+    return Buffer.from(await res.arrayBuffer());
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function friendlyError(err) {
   const m = String(err?.message || err);
-  if (m.includes("401") || m.includes("Token")) return "مفتاح Agnes غير صالح أو غير مضبوط.";
+  if (m.includes("401") || m.includes("Token")) return "مفتاح التوليد غير صالح أو غير مضبوط.";
   if (m.includes("429") || m.includes("503") || m.includes("queue")) return "طابور التوليد ممتلئ حالياً. جرّب بعد قليل.";
-  if (m.includes("402")) return "انتهى رصيد Agnes المجاني حالياً.";
+  if (m.includes("402")) return "انتهى رصيد التوليد المجاني حالياً.";
   return "تعذر توليد الفيديو الآن. حاول مجددًا.";
 }
 
@@ -135,11 +157,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/health") {
-      sendJson(res, 200, { ok: true, keySet: Boolean(AGNES_API_KEY) });
+      sendJson(res, 200, { ok: true, keySet: Boolean(AGNES_API_KEY), pollinationsKeySet: Boolean(POLLINATIONS_API_KEY) });
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/video") {
-      if (!AGNES_API_KEY) return sendJson(res, 200, { error: "توليد الفيديو غير مهيأ. أضف AGNES_API_KEY إلى إعدادات الخادم." });
+      if (!AGNES_API_KEY && !POLLINATIONS_API_KEY) return sendJson(res, 200, { error: "توليد الفيديو غير مهيأ. أضف مفتاح توليد إلى إعدادات الخادم." });
       const body = await readBody(req);
       const prompt = String(body.prompt || "").trim().slice(0, 1000);
       if (!prompt) return sendJson(res, 200, { error: "اكتب وصفاً أولاً." });
@@ -147,28 +169,55 @@ const server = http.createServer(async (req, res) => {
       const seconds = ["4", "5", "6", "8", "10", "12"].includes(String(body.seconds)) ? String(body.seconds) : "5";
       let created = null;
       let lastErr = null;
-      for (let attempt = 0; attempt < 5; attempt++) {
-        try {
-          created = await agnes("/v1/videos", {
-            method: "POST",
-            body: JSON.stringify({ model: MODEL, mode: "text", prompt, size: "720P", aspect_ratio: aspect, seconds, n: 1 }),
-          });
-          break;
-        } catch (err) {
-          lastErr = err;
-          const m = String(err?.message || err);
-          if (!m.includes("503") && !m.includes("429") && !m.includes("queue")) throw err;
-          await new Promise((r) => setTimeout(r, 20000));
+      if (AGNES_API_KEY) {
+        for (let attempt = 0; attempt < 5; attempt++) {
+          try {
+            created = await agnes("/v1/videos", {
+              method: "POST",
+              body: JSON.stringify({ model: MODEL, mode: "text", prompt, size: "720P", aspect_ratio: aspect, seconds, n: 1 }),
+            });
+            break;
+          } catch (err) {
+            lastErr = err;
+            const m = String(err?.message || err);
+            if (!m.includes("503") && !m.includes("429") && !m.includes("queue")) break;
+            await new Promise((r) => setTimeout(r, 20000));
+          }
         }
       }
-      if (!created) throw lastErr || new Error("create failed");
+      if (!created) {
+        if (POLLINATIONS_API_KEY) {
+          const mediaId = "polli-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+          mediaPending.add(mediaId);
+          pollinationsVideo(prompt, aspect)
+            .then((bytes) => {
+              mediaStore.set(mediaId, bytes);
+              while (mediaStore.size > 5) mediaStore.delete(mediaStore.keys().next().value);
+            })
+            .catch((err) => mediaErrors.set(mediaId, friendlyError(err)))
+            .finally(() => mediaPending.delete(mediaId));
+          return sendJson(res, 200, { videoId: mediaId });
+        }
+        throw lastErr || new Error("create failed");
+      }
       const videoId = created?.video_id || created?.id || created?.data?.video_id;
       if (!videoId) return sendJson(res, 200, { error: "تعذر بدء التوليد." });
       return sendJson(res, 200, { videoId });
     }
+    if (req.method === "GET" && url.pathname.startsWith("/api/media/")) {
+      const id = decodeURIComponent(url.pathname.slice("/api/media/".length));
+      const bytes = mediaStore.get(id);
+      if (!bytes) return sendJson(res, 404, { error: "not found" });
+      res.writeHead(200, { "Content-Type": "video/mp4" });
+      res.end(bytes);
+      return;
+    }
     if (req.method === "GET" && url.pathname.startsWith("/api/video/")) {
-      if (!AGNES_API_KEY) return sendJson(res, 200, { error: "توليد الفيديو غير مهيأ." });
       const id = decodeURIComponent(url.pathname.slice("/api/video/".length));
+      if (mediaStore.has(id)) return sendJson(res, 200, { url: "/api/media/" + encodeURIComponent(id) });
+      if (mediaErrors.has(id)) return sendJson(res, 200, { error: mediaErrors.get(id) });
+      if (mediaPending.has(id)) return sendJson(res, 200, { status: "pending" });
+      if (!AGNES_API_KEY) return sendJson(res, 200, { error: "توليد الفيديو غير مهيأ." });
       const st = await agnes(`/agnesapi?video_id=${encodeURIComponent(id)}&model_name=${encodeURIComponent(MODEL)}`);
       const videoUrl = st?.metadata?.url || st?.url || st?.data?.url || st?.video_url;
       if (videoUrl) return sendJson(res, 200, { url: videoUrl });
