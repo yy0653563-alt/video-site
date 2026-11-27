@@ -27,6 +27,17 @@ function readBody(req) {
   });
 }
 
+async function translatePrompt(prompt) {
+  if (!/[\u0600-\u06FF]/.test(prompt)) return prompt;
+  try {
+    const r = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(prompt)}&langpair=ar|en`);
+    const j = await r.json();
+    const t = j && j.responseData && j.responseData.translatedText;
+    return t && !/INVALID|QUERY LENGTH/i.test(t) ? t : prompt;
+  } catch {
+    return prompt;
+  }
+}
 async function agnes(path, options = {}) {
   const res = await fetch(AGNES_BASE + path, {
     ...options,
@@ -317,7 +328,8 @@ const server = http.createServer(async (req, res) => {
       const prompt = String(body.prompt || "").trim().slice(0, 1000);
       if (!prompt) return sendJson(res, 200, { error: "اكتب وصف الصورة أولاً." });
       const dims = body.aspect === "9:16" ? [720, 1280] : body.aspect === "1:1" ? [1024, 1024] : [1280, 720];
-      const imgRes = await fetch(`${POLLINATIONS_BASE}/image/${encodeURIComponent(prompt)}?model=flux&width=${dims[0]}&height=${dims[1]}`, {
+      const imagePrompt = await translatePrompt(prompt);
+      const imgRes = await fetch(`${POLLINATIONS_BASE}/image/${encodeURIComponent(imagePrompt)}?model=flux&width=${dims[0]}&height=${dims[1]}`, {
         headers: POLLINATIONS_API_KEY ? { Authorization: `Bearer ${POLLINATIONS_API_KEY}` } : {},
       });
       if (!imgRes.ok) return sendJson(res, 200, { error: "تعذر توليد الصورة الآن. حاول مجددًا." });
@@ -340,7 +352,8 @@ const server = http.createServer(async (req, res) => {
       mediaStore.set(srcId, { bytes: Buffer.from(m[2], "base64"), type: m[1] });
       const host = req.headers.host || "video-site-8teq.onrender.com";
       const srcUrl = `https://${host}/api/media/${encodeURIComponent(srcId)}`;
-      const imgRes = await fetch(`${POLLINATIONS_BASE}/image/${encodeURIComponent(prompt)}?model=flux&image=${encodeURIComponent(srcUrl)}`, {
+      const imagePrompt = await translatePrompt(prompt);
+      const imgRes = await fetch(`${POLLINATIONS_BASE}/image/${encodeURIComponent(imagePrompt)}?model=flux&image=${encodeURIComponent(srcUrl)}`, {
         headers: POLLINATIONS_API_KEY ? { Authorization: `Bearer ${POLLINATIONS_API_KEY}` } : {},
       });
       if (!imgRes.ok) return sendJson(res, 200, { error: "تعذر تعديل الصورة الآن. حاول مجددًا." });
