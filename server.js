@@ -116,14 +116,17 @@ const page = `<!DOCTYPE html>
     </select>
     <select id="seconds">
       <option value="5">5 ثوانٍ</option>
-      <option value="8">8 ثوانٍ</option>
-      <option value="12">12 ثانية</option>
+      <option value="10">10 ثوانٍ</option>
+      <option value="20">20 ثانية</option>
+      <option value="30">30 ثانية</option>
+      <option value="60" selected>60 ثانية (الأقصى)</option>
     </select>
   </div>
   <button id="go">ولّد الفيديو</button>
   <div id="status"></div>
   <video id="out" controls playsinline style="display:none"></video>
   <a id="dl" class="dl" download="mishhad-video.mp4">⬇️ تنزيل الفيديو</a>
+  <button id="extend" style="display:none;background:#2f9e6e">⏩ تمديد الفيديو</button>
 </div>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -162,11 +165,33 @@ $("go").onclick = async () => {
     $("out").style.display = "block";
     $("dl").href = url;
     $("dl").style.display = "inline-block";
+    $("extend").style.display = "block";
     $("status").textContent = "تم ✅";
   } catch (e) {
     $("status").textContent = e.message;
   } finally {
     $("go").disabled = false;
+  }
+};
+$("extend").onclick = async () => {
+  $("extend").disabled = true;
+  $("status").textContent = "جارٍ توليد مقطع تكميلي…";
+  try {
+    const base = $("prompt").value.trim();
+    const prompt = base ? base + ", continue the scene seamlessly" : "continue the scene seamlessly";
+    const r = await fetch("/api/video", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, aspect: $("aspect").value, seconds: $("seconds").value, imageData }) });
+    const j = await r.json();
+    if (!j.videoId) throw new Error(j.error || "تعذر بدء التمديد.");
+    const url = await poll(j.videoId);
+    $("out").src = url;
+    $("out").style.display = "block";
+    $("dl").href = url;
+    $("dl").style.display = "inline-block";
+    $("status").textContent = "تم التمديد ✅";
+  } catch (e) {
+    $("status").textContent = e.message;
+  } finally {
+    $("extend").disabled = false;
   }
 };
 </script>
@@ -192,7 +217,8 @@ const server = http.createServer(async (req, res) => {
       const imageData = typeof body.imageData === "string" ? body.imageData : "";
       if (!prompt && !imageData) return sendJson(res, 200, { error: "اكتب وصفاً أو ارفع صورة أولاً." });
       const aspect = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"].includes(body.aspect) ? body.aspect : "16:9";
-      const seconds = ["4", "5", "6", "8", "10", "12"].includes(String(body.seconds)) ? String(body.seconds) : "5";
+      const secondsNum = Math.min(60, Math.max(4, parseInt(body.seconds, 10) || 5));
+      const seconds = String(Math.min(12, secondsNum));
       if (imageData) {
         if (!MAGIC_HOUR_API_KEY) return sendJson(res, 200, { error: "تحريك الصور غير مهيأ حالياً." });
         const m = imageData.match(/^data:image\/([a-z0-9.+-]+);base64,(.+)$/i);
@@ -204,7 +230,7 @@ const server = http.createServer(async (req, res) => {
         if (!item?.upload_url || !item?.file_path) return sendJson(res, 200, { error: "تعذر رفع الصورة." });
         const put = await fetch(item.upload_url, { method: "PUT", body: bytes });
         if (!put.ok) return sendJson(res, 200, { error: "تعذر رفع الصورة." });
-        const mhBody = { end_seconds: Number(seconds), assets: { image_file_path: item.file_path }, model: "ltx-2.5", resolution: "480p", audio: true };
+        const mhBody = { end_seconds: secondsNum, assets: { image_file_path: item.file_path }, model: "ltx-2.5", resolution: "480p", audio: true };
         if (prompt) mhBody.style = { prompt };
         const mh = await magicHour("/v1/image-to-video", { method: "POST", body: JSON.stringify(mhBody) });
         if (!mh?.id) return sendJson(res, 200, { error: "تعذر بدء التوليد." });
@@ -234,7 +260,7 @@ const server = http.createServer(async (req, res) => {
             const mhAspect = ["16:9", "9:16", "1:1"].includes(aspect) ? aspect : "16:9";
             const mh = await magicHour("/v1/text-to-video", {
               method: "POST",
-              body: JSON.stringify({ end_seconds: Number(seconds), style: { prompt }, aspect_ratio: mhAspect, model: "ltx-2.5", resolution: "480p", audio: true }),
+              body: JSON.stringify({ end_seconds: secondsNum, style: { prompt }, aspect_ratio: mhAspect, model: "ltx-2.5", resolution: "480p", audio: true }),
             });
             if (mh?.id) return sendJson(res, 200, { videoId: "mh-" + mh.id });
           } catch (err) {
