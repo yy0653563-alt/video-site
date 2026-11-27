@@ -38,7 +38,7 @@ async function agnes(path, options = {}) {
 function friendlyError(err) {
   const m = String(err?.message || err);
   if (m.includes("401") || m.includes("Token")) return "مفتاح Agnes غير صالح أو غير مضبوط.";
-  if (m.includes("429")) return "الخدمة مضغوطة حالياً. جرّب بعد قليل.";
+  if (m.includes("429") || m.includes("503") || m.includes("queue")) return "طابور التوليد ممتلئ حالياً. جرّب بعد قليل.";
   if (m.includes("402")) return "انتهى رصيد Agnes المجاني حالياً.";
   return "تعذر توليد الفيديو الآن. حاول مجددًا.";
 }
@@ -145,10 +145,23 @@ const server = http.createServer(async (req, res) => {
       if (!prompt) return sendJson(res, 200, { error: "اكتب وصفاً أولاً." });
       const aspect = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"].includes(body.aspect) ? body.aspect : "16:9";
       const seconds = ["4", "5", "6", "8", "10", "12"].includes(String(body.seconds)) ? String(body.seconds) : "5";
-      const created = await agnes("/v1/videos", {
-        method: "POST",
-        body: JSON.stringify({ model: MODEL, mode: "text", prompt, size: "720P", aspect_ratio: aspect, seconds, n: 1 }),
-      });
+      let created = null;
+      let lastErr = null;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          created = await agnes("/v1/videos", {
+            method: "POST",
+            body: JSON.stringify({ model: MODEL, mode: "text", prompt, size: "720P", aspect_ratio: aspect, seconds, n: 1 }),
+          });
+          break;
+        } catch (err) {
+          lastErr = err;
+          const m = String(err?.message || err);
+          if (!m.includes("503") && !m.includes("429") && !m.includes("queue")) throw err;
+          await new Promise((r) => setTimeout(r, 20000));
+        }
+      }
+      if (!created) throw lastErr || new Error("create failed");
       const videoId = created?.video_id || created?.id || created?.data?.video_id;
       if (!videoId) return sendJson(res, 200, { error: "تعذر بدء التوليد." });
       return sendJson(res, 200, { videoId });
