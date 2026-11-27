@@ -98,9 +98,27 @@ const page = `<!DOCTYPE html>
   #status { margin-top:14px; color:#cfe0ff; min-height:22px; }
   video { width:100%; margin-top:14px; border-radius:14px; background:#000; }
   a.dl { display:none; margin-top:10px; color:#8fb3ff; }
+  #menuBtn { position:fixed; top:14px; inset-inline-start:14px; width:46px; height:46px; border-radius:12px; font-size:22px; margin:0; padding:0; z-index:20; }
+  #sidebar { position:fixed; top:0; inset-inline-start:0; height:100%; width:270px; max-width:82vw; background:#131c33; border-inline-end:1px solid #2b3a5f; padding:64px 16px 16px; box-sizing:border-box; transform:translateX(105%); transition:transform .25s; z-index:15; overflow-y:auto; }
+  [dir="rtl"] #sidebar { transform:translateX(105%); }
+  #sidebar.open { transform:translateX(0); }
+  #sidebar h3 { margin:14px 0 8px; font-size:16px; }
+  .histItem { display:flex; gap:8px; align-items:center; background:#16203a; border:1px solid #2b3a5f; border-radius:10px; padding:8px; margin-top:8px; }
+  .histItem a { color:#8fb3ff; flex:1; font-size:14px; }
+  .histItem button { width:34px; height:34px; margin:0; padding:0; border-radius:8px; background:#5a2430; font-size:15px; }
+  .navBtn { margin-top:8px; background:#22345e; }
 </style>
 </head>
 <body>
+<button id="menuBtn">☰</button>
+<aside id="sidebar">
+  <h3>التنقل</h3>
+  <button class="navBtn" id="navVideo">🎬 الفيديو</button>
+  <button class="navBtn" id="navImage">🎨 الصور</button>
+  <h3>المحفوظة</h3>
+  <div id="history"></div>
+  <button class="navBtn" id="clearHist" style="background:#5a2430">✕ حذف الكل</button>
+</aside>
 <div class="wrap">
   <h1>🎬 مِشهد</h1>
   <p class="sub">اكتب وصف المشهد، وولّد مقطع فيديو قصيراً.</p>
@@ -123,13 +141,50 @@ const page = `<!DOCTYPE html>
     </select>
   </div>
   <button id="go">ولّد الفيديو</button>
+  <button id="goimg" style="background:#8a5cff">🎨 ولّد صورة</button>
+  <button id="editimg" style="background:#c2692e">✏️ عدّل الصورة المرفوعة</button>
   <div id="status"></div>
   <video id="out" controls playsinline style="display:none"></video>
+  <img id="outimg" style="display:none;width:100%;margin-top:14px;border-radius:14px">
+  <a id="dlimg" class="dl" download="mishhad-image.jpg">⬇️ تنزيل الصورة</a>
   <a id="dl" class="dl" download="mishhad-video.mp4">⬇️ تنزيل الفيديو</a>
   <button id="extend" style="display:none;background:#2f9e6e">⏩ تمديد الفيديو</button>
 </div>
 <script>
 const $ = (id) => document.getElementById(id);
+$("menuBtn").onclick = () => $("sidebar").classList.toggle("open");
+$("navVideo").onclick = () => { $("out").scrollIntoView({ behavior: "smooth" }); $("sidebar").classList.remove("open"); };
+$("navImage").onclick = () => { $("outimg").scrollIntoView({ behavior: "smooth" }); $("sidebar").classList.remove("open"); };
+function loadHist() { try { return JSON.parse(localStorage.getItem("mishhad_history") || "[]"); } catch { return []; } }
+function renderHist() {
+  const h = loadHist();
+  $("history").innerHTML = h.length ? "" : "<div style='color:#9fb0d0;font-size:14px'>لا شيء محفوظ بعد.</div>";
+  h.forEach((it, i) => {
+    const d = document.createElement("div");
+    d.className = "histItem";
+    d.innerHTML = "<a target='_blank' rel='noopener'>" + (it.type === "video" ? "🎬 فيديو " : "🎨 صورة ") + it.date + "</a>";
+    d.querySelector("a").href = it.url;
+    const dl = document.createElement("a");
+    dl.textContent = "⬇️";
+    dl.href = it.url;
+    dl.setAttribute("download", it.type === "video" ? "mishhad-video.mp4" : "mishhad-image.jpg");
+    dl.style.flex = "0";
+    d.appendChild(dl);
+    const b = document.createElement("button");
+    b.textContent = "✕";
+    b.onclick = () => { const x = loadHist(); x.splice(i, 1); localStorage.setItem("mishhad_history", JSON.stringify(x)); renderHist(); };
+    d.appendChild(b);
+    $("history").appendChild(d);
+  });
+}
+function saveHist(type, url) {
+  const h = loadHist();
+  h.unshift({ type, url, date: new Date().toLocaleString("ar") });
+  localStorage.setItem("mishhad_history", JSON.stringify(h.slice(0, 20)));
+  renderHist();
+}
+$("clearHist").onclick = () => { localStorage.removeItem("mishhad_history"); renderHist(); };
+renderHist();
 let imageData = "";
 $("image").onchange = () => {
   const f = $("image").files[0];
@@ -160,17 +215,62 @@ $("go").onclick = async () => {
     const r = await fetch("/api/video", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, aspect: $("aspect").value, seconds: $("seconds").value, imageData }) });
     const j = await r.json();
     if (!j.videoId) throw new Error(j.error || "تعذر بدء التوليد.");
+    $("status").textContent = j.videoId.startsWith("mh-") ? "يولّد الآن عبر Magic Hour…" : j.videoId.startsWith("polli-") ? "يولّد الآن عبر Pollinations…" : "يولّد الآن عبر Agnes…";
     const url = await poll(j.videoId);
     $("out").src = url;
     $("out").style.display = "block";
     $("dl").href = url;
     $("dl").style.display = "inline-block";
     $("extend").style.display = "block";
+    saveHist("video", url);
     $("status").textContent = "تم ✅";
   } catch (e) {
     $("status").textContent = e.message;
   } finally {
     $("go").disabled = false;
+  }
+};
+$("goimg").onclick = async () => {
+  const prompt = $("prompt").value.trim();
+  if (!prompt) { $("status").textContent = "اكتب وصف الصورة أولاً."; return; }
+  $("goimg").disabled = true;
+  $("status").textContent = "جارٍ توليد الصورة…";
+  try {
+    const r = await fetch("/api/image", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, aspect: $("aspect").value }) });
+    const j = await r.json();
+    if (!j.url) throw new Error(j.error || "تعذر توليد الصورة.");
+    $("outimg").src = j.url;
+    $("outimg").style.display = "block";
+    $("dlimg").href = j.url;
+    $("dlimg").style.display = "inline-block";
+    saveHist("image", j.url);
+    $("status").textContent = "تم ✅";
+  } catch (e) {
+    $("status").textContent = e.message;
+  } finally {
+    $("goimg").disabled = false;
+  }
+};
+$("editimg").onclick = async () => {
+  const prompt = $("prompt").value.trim();
+  if (!imageData) { $("status").textContent = "ارفع صورة أولاً."; return; }
+  if (!prompt) { $("status").textContent = "اكتب التعديل المطلوب."; return; }
+  $("editimg").disabled = true;
+  $("status").textContent = "جارٍ تعديل الصورة…";
+  try {
+    const r = await fetch("/api/image-edit", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, imageData }) });
+    const j = await r.json();
+    if (!j.url) throw new Error(j.error || "تعذر تعديل الصورة.");
+    $("outimg").src = j.url;
+    $("outimg").style.display = "block";
+    $("dlimg").href = j.url;
+    $("dlimg").style.display = "inline-block";
+    saveHist("image", j.url);
+    $("status").textContent = "تم ✅";
+  } catch (e) {
+    $("status").textContent = e.message;
+  } finally {
+    $("editimg").disabled = false;
   }
 };
 $("extend").onclick = async () => {
@@ -182,11 +282,13 @@ $("extend").onclick = async () => {
     const r = await fetch("/api/video", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, aspect: $("aspect").value, seconds: $("seconds").value, imageData }) });
     const j = await r.json();
     if (!j.videoId) throw new Error(j.error || "تعذر بدء التمديد.");
+    $("status").textContent = j.videoId.startsWith("mh-") ? "يمدّد الآن عبر Magic Hour…" : j.videoId.startsWith("polli-") ? "يمدّد الآن عبر Pollinations…" : "يمدّد الآن عبر Agnes…";
     const url = await poll(j.videoId);
     $("out").src = url;
     $("out").style.display = "block";
     $("dl").href = url;
     $("dl").style.display = "inline-block";
+    saveHist("video", url);
     $("status").textContent = "تم التمديد ✅";
   } catch (e) {
     $("status").textContent = e.message;
@@ -209,6 +311,46 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/api/health") {
       sendJson(res, 200, { ok: true, keySet: Boolean(AGNES_API_KEY), pollinationsKeySet: Boolean(POLLINATIONS_API_KEY), magicHourKeySet: Boolean(MAGIC_HOUR_API_KEY) });
       return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/image") {
+      const body = await readBody(req);
+      const prompt = String(body.prompt || "").trim().slice(0, 1000);
+      if (!prompt) return sendJson(res, 200, { error: "اكتب وصف الصورة أولاً." });
+      const dims = body.aspect === "9:16" ? [720, 1280] : body.aspect === "1:1" ? [1024, 1024] : [1280, 720];
+      const imgRes = await fetch(`${POLLINATIONS_BASE}/image/${encodeURIComponent(prompt)}?model=flux&width=${dims[0]}&height=${dims[1]}`, {
+        headers: POLLINATIONS_API_KEY ? { Authorization: `Bearer ${POLLINATIONS_API_KEY}` } : {},
+      });
+      if (!imgRes.ok) return sendJson(res, 200, { error: "تعذر توليد الصورة الآن. حاول مجددًا." });
+      const type = imgRes.headers.get("content-type") || "image/jpeg";
+      if (!type.includes("image")) return sendJson(res, 200, { error: "تعذر توليد الصورة الآن. حاول مجددًا." });
+      const bytes = Buffer.from(await imgRes.arrayBuffer());
+      const mediaId = "img-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+      mediaStore.set(mediaId, { bytes, type });
+      while (mediaStore.size > 5) mediaStore.delete(mediaStore.keys().next().value);
+      return sendJson(res, 200, { url: "/api/media/" + encodeURIComponent(mediaId) });
+    }
+    if (req.method === "POST" && url.pathname === "/api/image-edit") {
+      const body = await readBody(req);
+      const prompt = String(body.prompt || "").trim().slice(0, 1000);
+      const imageData = typeof body.imageData === "string" ? body.imageData : "";
+      if (!prompt || !imageData) return sendJson(res, 200, { error: "ارفع صورة واكتب التعديل." });
+      const m = imageData.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+      if (!m) return sendJson(res, 200, { error: "الصورة غير صالحة." });
+      const srcId = "src-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+      mediaStore.set(srcId, { bytes: Buffer.from(m[2], "base64"), type: m[1] });
+      const host = req.headers.host || "video-site-8teq.onrender.com";
+      const srcUrl = `https://${host}/api/media/${encodeURIComponent(srcId)}`;
+      const imgRes = await fetch(`${POLLINATIONS_BASE}/image/${encodeURIComponent(prompt)}?model=flux&image=${encodeURIComponent(srcUrl)}`, {
+        headers: POLLINATIONS_API_KEY ? { Authorization: `Bearer ${POLLINATIONS_API_KEY}` } : {},
+      });
+      if (!imgRes.ok) return sendJson(res, 200, { error: "تعذر تعديل الصورة الآن. حاول مجددًا." });
+      const type = imgRes.headers.get("content-type") || "image/jpeg";
+      if (!type.includes("image")) return sendJson(res, 200, { error: "تعذر تعديل الصورة الآن. حاول مجددًا." });
+      const bytes = Buffer.from(await imgRes.arrayBuffer());
+      const mediaId = "img-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+      mediaStore.set(mediaId, { bytes, type });
+      while (mediaStore.size > 8) mediaStore.delete(mediaStore.keys().next().value);
+      return sendJson(res, 200, { url: "/api/media/" + encodeURIComponent(mediaId) });
     }
     if (req.method === "POST" && url.pathname === "/api/video") {
       if (!AGNES_API_KEY && !POLLINATIONS_API_KEY) return sendJson(res, 200, { error: "توليد الفيديو غير مهيأ. أضف مفتاح توليد إلى إعدادات الخادم." });
@@ -287,9 +429,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "GET" && url.pathname.startsWith("/api/media/")) {
       const id = decodeURIComponent(url.pathname.slice("/api/media/".length));
-      const bytes = mediaStore.get(id);
-      if (!bytes) return sendJson(res, 404, { error: "not found" });
-      res.writeHead(200, { "Content-Type": "video/mp4" });
+      const entry = mediaStore.get(id);
+      if (!entry) return sendJson(res, 404, { error: "not found" });
+      const bytes = entry.bytes || entry;
+      res.writeHead(200, { "Content-Type": entry.type || "video/mp4" });
       res.end(bytes);
       return;
     }
