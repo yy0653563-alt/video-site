@@ -6,6 +6,8 @@ const AGNES_BASE = process.env.AGNES_BASE_URL || "https://apihub.agnes-ai.com";
 const MODEL = "agnes-video-2.5-flash";
 const POLLINATIONS_API_KEY = process.env.POLLINATIONS_API_KEY || "";
 const POLLINATIONS_BASE = process.env.POLLINATIONS_BASE_URL || "https://gen.pollinations.ai";
+const MAGIC_HOUR_API_KEY = process.env.MAGIC_HOUR_API_KEY || "";
+const MAGIC_HOUR_BASE = process.env.MAGIC_HOUR_BASE_URL || "https://api.magichour.ai";
 const mediaStore = new Map();
 const mediaErrors = new Map();
 const mediaPending = new Set();
@@ -55,6 +57,18 @@ async function pollinationsVideo(prompt, aspect) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function magicHour(path, options = {}) {
+  const res = await fetch(MAGIC_HOUR_BASE + path, {
+    ...options,
+    headers: { Authorization: `Bearer ${MAGIC_HOUR_API_KEY}`, "Content-Type": "application/json", ...(options.headers || {}) },
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch {}
+  if (!res.ok) throw new Error(`MagicHour ${res.status}: ${json?.error?.message || json?.message || text.slice(0, 160)}`);
+  return json;
 }
 
 function friendlyError(err) {
@@ -157,7 +171,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/health") {
-      sendJson(res, 200, { ok: true, keySet: Boolean(AGNES_API_KEY), pollinationsKeySet: Boolean(POLLINATIONS_API_KEY) });
+      sendJson(res, 200, { ok: true, keySet: Boolean(AGNES_API_KEY), pollinationsKeySet: Boolean(POLLINATIONS_API_KEY), magicHourKeySet: Boolean(MAGIC_HOUR_API_KEY) });
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/video") {
@@ -186,6 +200,18 @@ const server = http.createServer(async (req, res) => {
         }
       }
       if (!created) {
+        if (MAGIC_HOUR_API_KEY) {
+          try {
+            const mhAspect = ["16:9", "9:16", "1:1"].includes(aspect) ? aspect : "16:9";
+            const mh = await magicHour("/v1/text-to-video", {
+              method: "POST",
+              body: JSON.stringify({ end_seconds: Number(seconds), style: { prompt }, aspect_ratio: mhAspect, model: "ltx-2.5", resolution: "480p" }),
+            });
+            if (mh?.id) return sendJson(res, 200, { videoId: "mh-" + mh.id });
+          } catch (err) {
+            lastErr = err;
+          }
+        }
         if (POLLINATIONS_API_KEY) {
           const mediaId = "polli-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
           mediaPending.add(mediaId);
@@ -217,6 +243,14 @@ const server = http.createServer(async (req, res) => {
       if (mediaStore.has(id)) return sendJson(res, 200, { url: "/api/media/" + encodeURIComponent(id) });
       if (mediaErrors.has(id)) return sendJson(res, 200, { error: mediaErrors.get(id) });
       if (mediaPending.has(id)) return sendJson(res, 200, { status: "pending" });
+      if (id.startsWith("mh-")) {
+        const st = await magicHour(`/v1/video-projects/${encodeURIComponent(id.slice(3))}`);
+        const status = String(st?.status || "").toLowerCase();
+        const dl = st?.downloads?.[0]?.url;
+        if (status === "complete" && dl) return sendJson(res, 200, { url: dl });
+        if (status === "error" || status === "canceled") return sendJson(res, 200, { error: "فشل التوليد. حاول مجددًا." });
+        return sendJson(res, 200, { status: status || "pending" });
+      }
       if (!AGNES_API_KEY) return sendJson(res, 200, { error: "توليد الفيديو غير مهيأ." });
       const st = await agnes(`/agnesapi?video_id=${encodeURIComponent(id)}&model_name=${encodeURIComponent(MODEL)}`);
       const videoUrl = st?.metadata?.url || st?.url || st?.data?.url || st?.video_url;
