@@ -8,6 +8,8 @@ const POLLINATIONS_API_KEY = process.env.POLLINATIONS_API_KEY || "";
 const POLLINATIONS_BASE = process.env.POLLINATIONS_BASE_URL || "https://gen.pollinations.ai";
 const MAGIC_HOUR_API_KEY = process.env.MAGIC_HOUR_API_KEY || "";
 const MAGIC_HOUR_BASE = process.env.MAGIC_HOUR_BASE_URL || "https://api.magichour.ai";
+const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY || "";
+const DASHSCOPE_BASE = process.env.DASHSCOPE_BASE_URL || "https://ap-southeast-1.maas.qwencloudapi.com/api/v1";
 const mediaStore = new Map();
 const mediaErrors = new Map();
 const mediaPending = new Set();
@@ -104,6 +106,18 @@ async function magicHour(path, options = {}) {
   let json = null;
   try { json = JSON.parse(text); } catch {}
   if (!res.ok) throw new Error(`MagicHour ${res.status}: ${json?.error?.message || json?.message || text.slice(0, 160)}`);
+  return json;
+}
+
+async function dashscope(path, options = {}) {
+  const res = await fetch(DASHSCOPE_BASE + path, {
+    ...options,
+    headers: { Authorization: `Bearer ${DASHSCOPE_API_KEY}`, "Content-Type": "application/json", "X-DashScope-Async": "enable", ...(options.headers || {}) },
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch {}
+  if (!res.ok) throw new Error(`DashScope ${res.status}: ${json?.message || json?.code || text.slice(0, 160)}`);
   return json;
 }
 
@@ -266,7 +280,7 @@ $("go").onclick = async () => {
     const r = await fetch("/api/video", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, aspect: $("aspect").value, seconds: $("seconds").value, imageData }) });
     const j = await r.json();
     if (!j.videoId) throw new Error(j.error || "تعذر بدء التوليد.");
-    $("status").textContent = j.videoId.startsWith("mh-") ? "يولّد الآن عبر Magic Hour…" : j.videoId.startsWith("polli-") ? "يولّد الآن عبر Pollinations…" : "يولّد الآن عبر Agnes…";
+    $("status").textContent = j.videoId.startsWith("ds-") ? "يولّد الآن عبر Qwen…" : j.videoId.startsWith("mh-") ? "يولّد الآن عبر Magic Hour…" : j.videoId.startsWith("polli-") ? "يولّد الآن عبر Pollinations…" : "يولّد الآن عبر Agnes…";
     const url = await poll(j.videoId);
     $("out").src = url;
     $("out").style.display = "block";
@@ -367,7 +381,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/health") {
-      sendJson(res, 200, { ok: true, keySet: Boolean(AGNES_API_KEY), pollinationsKeySet: Boolean(POLLINATIONS_API_KEY), magicHourKeySet: Boolean(MAGIC_HOUR_API_KEY) });
+      sendJson(res, 200, { ok: true, keySet: Boolean(AGNES_API_KEY), pollinationsKeySet: Boolean(POLLINATIONS_API_KEY), magicHourKeySet: Boolean(MAGIC_HOUR_API_KEY), dashscopeKeySet: Boolean(DASHSCOPE_API_KEY) });
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/image") {
@@ -486,6 +500,16 @@ const server = http.createServer(async (req, res) => {
             } catch {}
           }
         }
+        if (DASHSCOPE_API_KEY) {
+          try {
+            const ds = await dashscope("/services/aigc/video-generation/video-synthesis", {
+              method: "POST",
+              body: JSON.stringify({ model: "wan2.6-i2v-flash", input: { prompt: prompt || "Animate this image naturally with gentle motion", img_url: imageData }, parameters: { resolution: "720P", duration: Math.min(15, Math.max(2, secondsNum)), prompt_extend: true, watermark: false } }),
+            });
+            const taskId = ds?.output?.task_id || ds?.task_id;
+            if (taskId) return sendJson(res, 200, { videoId: "ds-" + taskId });
+          } catch {}
+        }
         if (!MAGIC_HOUR_API_KEY) return sendJson(res, 200, { error: "تحريك الصور غير مهيأ حالياً." });
         const up = await magicHour("/v1/files/upload-urls", { method: "POST", body: JSON.stringify({ items: [{ type: "image", extension: ext }] }) });
         const item = up?.items?.[0];
@@ -581,6 +605,14 @@ const server = http.createServer(async (req, res) => {
       if (mediaStore.has(id)) return sendJson(res, 200, { url: "/api/media/" + encodeURIComponent(id) });
       if (mediaErrors.has(id)) return sendJson(res, 200, { error: mediaErrors.get(id) });
       if (mediaPending.has(id)) return sendJson(res, 200, { status: "pending" });
+      if (id.startsWith("ds-")) {
+        const st = await dashscope(`/tasks/${encodeURIComponent(id.slice(3))}`);
+        const status = String(st?.output?.task_status || st?.task_status || "").toUpperCase();
+        const videoUrl = st?.output?.video_url || st?.video_url;
+        if (status === "SUCCEEDED" && videoUrl) return sendJson(res, 200, { url: videoUrl });
+        if (status === "FAILED" || status === "CANCELED") return sendJson(res, 200, { error: "فشل التوليد. حاول مجددًا." });
+        return sendJson(res, 200, { status: status ? status.toLowerCase() : "pending" });
+      }
       if (id.startsWith("mh-")) {
         const st = await magicHour(`/v1/video-projects/${encodeURIComponent(id.slice(3))}`);
         const status = String(st?.status || "").toLowerCase();
