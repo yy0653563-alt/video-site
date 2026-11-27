@@ -21,7 +21,7 @@ function sendJson(res, status, obj) {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = "";
-    req.on("data", (c) => { data += c; if (data.length > 1e6) reject(new Error("too large")); });
+    req.on("data", (c) => { data += c; if (data.length > 8e6) reject(new Error("too large")); });
     req.on("end", () => { try { resolve(data ? JSON.parse(data) : {}); } catch { reject(new Error("bad json")); } });
     req.on("error", reject);
   });
@@ -105,6 +105,9 @@ const page = `<!DOCTYPE html>
   <h1>🎬 مِشهد</h1>
   <p class="sub">اكتب وصف المشهد، وولّد مقطع فيديو قصيراً.</p>
   <textarea id="prompt" placeholder="مثال: شروق الشمس فوق البحر، كاميرا تتحرك ببطء، ألوان دافئة"></textarea>
+  <label style="display:block;margin-top:12px;color:#cfe0ff">📷 صورة للتحريك (اختياري)</label>
+  <input id="image" type="file" accept="image/*" style="width:100%;box-sizing:border-box;margin-top:6px;border-radius:12px;border:1px solid #2b3a5f;background:#16203a;color:#eef2ff;padding:12px;font-size:15px">
+  <img id="preview" style="display:none;width:100%;margin-top:10px;border-radius:14px">
   <div class="row">
     <select id="aspect">
       <option value="16:9">أفقي 16:9</option>
@@ -124,6 +127,14 @@ const page = `<!DOCTYPE html>
 </div>
 <script>
 const $ = (id) => document.getElementById(id);
+let imageData = "";
+$("image").onchange = () => {
+  const f = $("image").files[0];
+  if (!f) { imageData = ""; $("preview").style.display = "none"; return; }
+  const r = new FileReader();
+  r.onload = () => { imageData = r.result; $("preview").src = imageData; $("preview").style.display = "block"; };
+  r.readAsDataURL(f);
+};
 async function poll(id) {
   for (let i = 0; i < 160; i++) {
     const r = await fetch("/api/video/" + encodeURIComponent(id));
@@ -137,13 +148,13 @@ async function poll(id) {
 }
 $("go").onclick = async () => {
   const prompt = $("prompt").value.trim();
-  if (!prompt) { $("status").textContent = "اكتب وصفاً أولاً."; return; }
+  if (!prompt && !imageData) { $("status").textContent = "اكتب وصفاً أو ارفع صورة أولاً."; return; }
   $("go").disabled = true;
   $("out").style.display = "none";
   $("dl").style.display = "none";
   $("status").textContent = "جارٍ إرسال الطلب…";
   try {
-    const r = await fetch("/api/video", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, aspect: $("aspect").value, seconds: $("seconds").value }) });
+    const r = await fetch("/api/video", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, aspect: $("aspect").value, seconds: $("seconds").value, imageData }) });
     const j = await r.json();
     if (!j.videoId) throw new Error(j.error || "تعذر بدء التوليد.");
     const url = await poll(j.videoId);
@@ -178,9 +189,27 @@ const server = http.createServer(async (req, res) => {
       if (!AGNES_API_KEY && !POLLINATIONS_API_KEY) return sendJson(res, 200, { error: "توليد الفيديو غير مهيأ. أضف مفتاح توليد إلى إعدادات الخادم." });
       const body = await readBody(req);
       const prompt = String(body.prompt || "").trim().slice(0, 1000);
-      if (!prompt) return sendJson(res, 200, { error: "اكتب وصفاً أولاً." });
+      const imageData = typeof body.imageData === "string" ? body.imageData : "";
+      if (!prompt && !imageData) return sendJson(res, 200, { error: "اكتب وصفاً أو ارفع صورة أولاً." });
       const aspect = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"].includes(body.aspect) ? body.aspect : "16:9";
       const seconds = ["4", "5", "6", "8", "10", "12"].includes(String(body.seconds)) ? String(body.seconds) : "5";
+      if (imageData) {
+        if (!MAGIC_HOUR_API_KEY) return sendJson(res, 200, { error: "تحريك الصور غير مهيأ حالياً." });
+        const m = imageData.match(/^data:image\/([a-z0-9.+-]+);base64,(.+)$/i);
+        if (!m) return sendJson(res, 200, { error: "الصورة غير صالحة." });
+        const ext = m[1].toLowerCase().replace("jpeg", "jpg");
+        const bytes = Buffer.from(m[2], "base64");
+        const up = await magicHour("/v1/files/upload-urls", { method: "POST", body: JSON.stringify({ items: [{ type: "image", extension: ext }] }) });
+        const item = up?.items?.[0];
+        if (!item?.upload_url || !item?.file_path) return sendJson(res, 200, { error: "تعذر رفع الصورة." });
+        const put = await fetch(item.upload_url, { method: "PUT", body: bytes });
+        if (!put.ok) return sendJson(res, 200, { error: "تعذر رفع الصورة." });
+        const mhBody = { end_seconds: Number(seconds), assets: { image_file_path: item.file_path }, model: "ltx-2.5", resolution: "480p", audio: true };
+        if (prompt) mhBody.style = { prompt };
+        const mh = await magicHour("/v1/image-to-video", { method: "POST", body: JSON.stringify(mhBody) });
+        if (!mh?.id) return sendJson(res, 200, { error: "تعذر بدء التوليد." });
+        return sendJson(res, 200, { videoId: "mh-" + mh.id });
+      }
       let created = null;
       let lastErr = null;
       if (AGNES_API_KEY) {
@@ -205,7 +234,7 @@ const server = http.createServer(async (req, res) => {
             const mhAspect = ["16:9", "9:16", "1:1"].includes(aspect) ? aspect : "16:9";
             const mh = await magicHour("/v1/text-to-video", {
               method: "POST",
-              body: JSON.stringify({ end_seconds: Number(seconds), style: { prompt }, aspect_ratio: mhAspect, model: "ltx-2.5", resolution: "480p" }),
+              body: JSON.stringify({ end_seconds: Number(seconds), style: { prompt }, aspect_ratio: mhAspect, model: "ltx-2.5", resolution: "480p", audio: true }),
             });
             if (mh?.id) return sendJson(res, 200, { videoId: "mh-" + mh.id });
           } catch (err) {
