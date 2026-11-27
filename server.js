@@ -30,6 +30,13 @@ function readBody(req) {
 async function translatePrompt(prompt) {
   if (!/[\u0600-\u06FF]/.test(prompt)) return prompt;
   try {
+    const r = await fetch(`${POLLINATIONS_BASE}/text/${encodeURIComponent("Translate to English, output only the translation: " + prompt)}?model=openai`, {
+      headers: POLLINATIONS_API_KEY ? { Authorization: `Bearer ${POLLINATIONS_API_KEY}` } : {},
+    });
+    const t = (await r.text()).trim();
+    if (r.ok && t && !t.startsWith("{")) return t.replace(/^"|"$/g, "");
+  } catch {}
+  try {
     const r = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(prompt)}&langpair=ar|en`);
     const j = await r.json();
     const t = j && j.responseData && j.responseData.translatedText;
