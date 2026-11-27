@@ -258,6 +258,9 @@ $("go").onclick = async () => {
   $("go").disabled = true;
   $("out").style.display = "none";
   $("dl").style.display = "none";
+  $("preview").style.display = "none";
+  $("outimg").style.display = "none";
+  $("dlimg").style.display = "none";
   $("status").textContent = "جارٍ إرسال الطلب…";
   try {
     const r = await fetch("/api/video", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, aspect: $("aspect").value, seconds: $("seconds").value, imageData }) });
@@ -267,6 +270,7 @@ $("go").onclick = async () => {
     const url = await poll(j.videoId);
     $("out").src = url;
     $("out").style.display = "block";
+    $("out").play().catch(() => {});
     $("dl").href = url;
     $("dl").style.display = "inline-block";
     $("extend").style.display = "block";
@@ -282,6 +286,9 @@ $("goimg").onclick = async () => {
   const prompt = $("prompt").value.trim();
   if (!prompt) { $("status").textContent = "اكتب وصف الصورة أولاً."; return; }
   $("goimg").disabled = true;
+  $("out").style.display = "none";
+  $("dl").style.display = "none";
+  $("extend").style.display = "none";
   $("status").textContent = "جارٍ توليد الصورة…";
   try {
     const r = await fetch("/api/image", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: await translateClient(prompt), aspect: $("aspect").value }) });
@@ -304,6 +311,9 @@ $("editimg").onclick = async () => {
   if (!imageData) { $("status").textContent = "ارفع صورة أولاً."; return; }
   if (!prompt) { $("status").textContent = "اكتب التعديل المطلوب."; return; }
   $("editimg").disabled = true;
+  $("out").style.display = "none";
+  $("dl").style.display = "none";
+  $("extend").style.display = "none";
   $("status").textContent = "جارٍ تعديل الصورة…";
   try {
     const r = await fetch("/api/image-edit", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: await translateClient(prompt), imageData }) });
@@ -455,18 +465,24 @@ const server = http.createServer(async (req, res) => {
         const ext = m[1].toLowerCase().replace("jpeg", "jpg");
         const bytes = Buffer.from(m[2], "base64");
         if (AGNES_API_KEY) {
-          try {
-            const uploadId = "imgup-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
-            mediaStore.set(uploadId, { bytes, type: "image/" + (ext === "jpg" ? "jpeg" : ext) });
-            while (mediaStore.size > 8) mediaStore.delete(mediaStore.keys().next().value);
-            const imageUrl = `https://${req.headers.host}/api/media/${encodeURIComponent(uploadId)}`;
-            const created = await agnes("/v1/videos", {
-              method: "POST",
-              body: JSON.stringify({ model: MODEL, prompt: prompt || "Animate this image naturally with gentle motion", image: imageUrl, size: "720P", aspect_ratio: aspect, seconds, n: 1 }),
-            });
-            const videoId = created?.video_id || created?.id || created?.data?.video_id;
-            if (videoId) return sendJson(res, 200, { videoId });
-          } catch {}
+          const uploadId = "imgup-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+          mediaStore.set(uploadId, { bytes, type: "image/" + (ext === "jpg" ? "jpeg" : ext) });
+          while (mediaStore.size > 8) mediaStore.delete(mediaStore.keys().next().value);
+          const imageUrl = `https://${req.headers.host}/api/media/${encodeURIComponent(uploadId)}`;
+          const agnesPrompt = prompt || "Animate this image naturally with gentle motion";
+          const payloads = [
+            { model: MODEL, prompt: agnesPrompt, image: imageUrl, size: "720P", aspect_ratio: aspect, seconds, n: 1 },
+            { model: MODEL, prompt: agnesPrompt, image: imageData, size: "720P", aspect_ratio: aspect, seconds, n: 1 },
+            { model: MODEL, prompt: agnesPrompt, mode: "ti2vid", image: imageUrl, num_frames: 121, frame_rate: 24 },
+            { model: MODEL, prompt: agnesPrompt, extra_body: { image: [imageData] }, num_frames: 121, frame_rate: 24 },
+          ];
+          for (const payload of payloads) {
+            try {
+              const created = await agnes("/v1/videos", { method: "POST", body: JSON.stringify(payload) });
+              const videoId = created?.video_id || created?.id || created?.task_id || created?.data?.video_id || created?.data?.id;
+              if (videoId) return sendJson(res, 200, { videoId });
+            } catch {}
+          }
         }
         if (!MAGIC_HOUR_API_KEY) return sendJson(res, 200, { error: "تحريك الصور غير مهيأ حالياً." });
         const up = await magicHour("/v1/files/upload-urls", { method: "POST", body: JSON.stringify({ items: [{ type: "image", extension: ext }] }) });
