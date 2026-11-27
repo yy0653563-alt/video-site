@@ -365,13 +365,32 @@ const server = http.createServer(async (req, res) => {
       if (!prompt) return sendJson(res, 200, { error: "اكتب وصف الصورة أولاً." });
       const dims = body.aspect === "9:16" ? [720, 1280] : body.aspect === "1:1" ? [1024, 1024] : [1280, 720];
       const imagePrompt = await translatePrompt(prompt);
-      const imgRes = await fetch(`${POLLINATIONS_BASE}/image/${encodeURIComponent(imagePrompt)}?model=flux&width=${dims[0]}&height=${dims[1]}`, {
-        headers: POLLINATIONS_API_KEY ? { Authorization: `Bearer ${POLLINATIONS_API_KEY}` } : {},
-      });
-      if (!imgRes.ok) return sendJson(res, 200, { error: "تعذر توليد الصورة الآن. حاول مجددًا." });
-      const type = imgRes.headers.get("content-type") || "image/jpeg";
-      if (!type.includes("image")) return sendJson(res, 200, { error: "تعذر توليد الصورة الآن. حاول مجددًا." });
-      const bytes = Buffer.from(await imgRes.arrayBuffer());
+      let bytes = null;
+      let type = "image/jpeg";
+      try {
+        const ar = await fetch("https://apihub.agnes-ai.com/v1/images/generations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${AGNES_API_KEY}` },
+          body: JSON.stringify({ model: "agnes-image-2.1-flash", prompt: imagePrompt, size: `${dims[0]}x${dims[1]}` }),
+          signal: AbortSignal.timeout(120000),
+        });
+        const aj = await ar.json().catch(() => null);
+        const d = aj && aj.data && aj.data[0];
+        if (ar.ok && d && d.b64_json) { bytes = Buffer.from(d.b64_json, "base64"); type = "image/png"; }
+        else if (ar.ok && d && d.url) {
+          const ir = await fetch(d.url, { signal: AbortSignal.timeout(60000) });
+          if (ir.ok) { bytes = Buffer.from(await ir.arrayBuffer()); type = ir.headers.get("content-type") || "image/png"; }
+        }
+      } catch {}
+      if (!bytes) {
+        const imgRes = await fetch(`${POLLINATIONS_BASE}/image/${encodeURIComponent(imagePrompt)}?model=flux&width=${dims[0]}&height=${dims[1]}`, {
+          headers: POLLINATIONS_API_KEY ? { Authorization: `Bearer ${POLLINATIONS_API_KEY}` } : {},
+        });
+        if (!imgRes.ok) return sendJson(res, 200, { error: "تعذر توليد الصورة الآن. حاول مجددًا." });
+        type = imgRes.headers.get("content-type") || "image/jpeg";
+        if (!type.includes("image")) return sendJson(res, 200, { error: "تعذر توليد الصورة الآن. حاول مجددًا." });
+        bytes = Buffer.from(await imgRes.arrayBuffer());
+      }
       const mediaId = "img-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
       mediaStore.set(mediaId, { bytes, type });
       while (mediaStore.size > 5) mediaStore.delete(mediaStore.keys().next().value);
