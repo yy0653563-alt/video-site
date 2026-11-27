@@ -12,6 +12,9 @@ const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY || "";
 const DASHSCOPE_BASE = process.env.DASHSCOPE_BASE_URL || "https://ap-southeast-1.maas.qwencloudapi.com/api/v1";
 const LTX_API_KEY = process.env.LTX_API_KEY || "";
 const LTX_BASE = process.env.LTX_BASE_URL || "https://ltx-2api.com";
+const EVERYPIXEL_CLIENT_ID = process.env.EVERYPIXEL_CLIENT_ID || "";
+const EVERYPIXEL_CLIENT_SECRET = process.env.EVERYPIXEL_CLIENT_SECRET || "";
+const EVERYPIXEL_BASE = process.env.EVERYPIXEL_BASE_URL || "https://api.everypixel.com/v1";
 const mediaStore = new Map();
 const mediaErrors = new Map();
 const mediaPending = new Set();
@@ -132,6 +135,19 @@ async function ltx(path, options = {}) {
   let json = null;
   try { json = JSON.parse(text); } catch {}
   if (!res.ok) throw new Error(`LTX ${res.status}: ${json?.message || json?.error || text.slice(0, 160)}`);
+  return json;
+}
+
+async function everypixel(path, options = {}) {
+  const auth = Buffer.from(`${EVERYPIXEL_CLIENT_ID}:${EVERYPIXEL_CLIENT_SECRET}`).toString("base64");
+  const res = await fetch(EVERYPIXEL_BASE + path, {
+    ...options,
+    headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/json", ...(options.headers || {}) },
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch {}
+  if (!res.ok) throw new Error(`Everypixel ${res.status}: ${json?.message || json?.error || text.slice(0, 160)}`);
   return json;
 }
 
@@ -294,7 +310,7 @@ $("go").onclick = async () => {
     const r = await fetch("/api/video", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, aspect: $("aspect").value, seconds: $("seconds").value, imageData }) });
     const j = await r.json();
     if (!j.videoId) throw new Error(j.error || "تعذر بدء التوليد.");
-    $("status").textContent = j.videoId.startsWith("ds-") ? "يولّد الآن عبر Qwen…" : j.videoId.startsWith("ltx-") ? "يولّد الآن عبر LTX…" : j.videoId.startsWith("mh-") ? "يولّد الآن عبر Magic Hour…" : j.videoId.startsWith("polli-") ? "يولّد الآن عبر Pollinations…" : "يولّد الآن عبر Agnes…";
+    $("status").textContent = j.videoId.startsWith("ds-") ? "يولّد الآن عبر Qwen…" : j.videoId.startsWith("ltx-") ? "يولّد الآن عبر LTX…" : j.videoId.startsWith("ep-") ? "يولّد الآن عبر Everypixel…" : j.videoId.startsWith("mh-") ? "يولّد الآن عبر Magic Hour…" : j.videoId.startsWith("polli-") ? "يولّد الآن عبر Pollinations…" : "يولّد الآن عبر Agnes…";
     const url = await poll(j.videoId);
     $("out").src = url;
     $("out").style.display = "block";
@@ -395,7 +411,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/health") {
-      sendJson(res, 200, { ok: true, keySet: Boolean(AGNES_API_KEY), pollinationsKeySet: Boolean(POLLINATIONS_API_KEY), magicHourKeySet: Boolean(MAGIC_HOUR_API_KEY), dashscopeKeySet: Boolean(DASHSCOPE_API_KEY), ltxKeySet: Boolean(LTX_API_KEY) });
+      sendJson(res, 200, { ok: true, keySet: Boolean(AGNES_API_KEY), pollinationsKeySet: Boolean(POLLINATIONS_API_KEY), magicHourKeySet: Boolean(MAGIC_HOUR_API_KEY), dashscopeKeySet: Boolean(DASHSCOPE_API_KEY), ltxKeySet: Boolean(LTX_API_KEY), everypixelKeySet: Boolean(EVERYPIXEL_CLIENT_ID && EVERYPIXEL_CLIENT_SECRET) });
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/image") {
@@ -538,6 +554,20 @@ const server = http.createServer(async (req, res) => {
             if (taskId) return sendJson(res, 200, { videoId: "ltx-" + taskId });
           } catch {}
         }
+        if (EVERYPIXEL_CLIENT_ID && EVERYPIXEL_CLIENT_SECRET) {
+          try {
+            const uploadId = "imgup-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8) + "." + ext;
+            mediaStore.set(uploadId, { bytes, type: "image/" + (ext === "jpg" ? "jpeg" : ext) });
+            while (mediaStore.size > 8) mediaStore.delete(mediaStore.keys().next().value);
+            const imageUrl = `https://${req.headers.host}/api/media/${encodeURIComponent(uploadId)}`;
+            const ep = await everypixel("/video_generate", {
+              method: "POST",
+              body: JSON.stringify({ model: "ltx23", prompt: prompt || "Animate this image naturally with gentle motion", duration: Math.min(10, Math.max(1, secondsNum)), resolution: "480p", aspect_ratio: aspect, image_url: imageUrl }),
+            });
+            const taskId = ep?.task_id || ep?.id;
+            if (taskId) return sendJson(res, 200, { videoId: "ep-" + taskId });
+          } catch {}
+        }
         if (!MAGIC_HOUR_API_KEY) return sendJson(res, 200, { error: "تحريك الصور غير مهيأ حالياً." });
         const up = await magicHour("/v1/files/upload-urls", { method: "POST", body: JSON.stringify({ items: [{ type: "image", extension: ext }] }) });
         const item = up?.items?.[0];
@@ -648,6 +678,14 @@ const server = http.createServer(async (req, res) => {
         const videoUrl = (typeof first === "string" ? first : first?.url) || st?.video_url || st?.data?.video_url;
         if (status === "SUCCESS" && videoUrl) return sendJson(res, 200, { url: videoUrl });
         if (status === "FAILED") return sendJson(res, 200, { error: "فشل التوليد. حاول مجددًا." });
+        return sendJson(res, 200, { status: status ? status.toLowerCase() : "pending" });
+      }
+      if (id.startsWith("ep-")) {
+        const st = await everypixel(`/status?task_id=${encodeURIComponent(id.slice(3))}`);
+        const status = String(st?.status || "").toUpperCase();
+        const videoUrl = typeof st?.result === "string" ? st.result : st?.result?.url;
+        if (status === "SUCCESS" && videoUrl) return sendJson(res, 200, { url: videoUrl });
+        if (status === "FAILURE" || status === "REVOKED") return sendJson(res, 200, { error: "فشل التوليد. حاول مجددًا." });
         return sendJson(res, 200, { status: status ? status.toLowerCase() : "pending" });
       }
       if (id.startsWith("mh-")) {
