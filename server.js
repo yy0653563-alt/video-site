@@ -34,7 +34,14 @@ async function translatePrompt(prompt) {
       headers: POLLINATIONS_API_KEY ? { Authorization: `Bearer ${POLLINATIONS_API_KEY}` } : {},
     });
     const t = (await r.text()).trim();
-    if (r.ok && t && !t.startsWith("{")) return t.replace(/^"|"$/g, "");
+    if (r.ok && t) {
+      try {
+        const j = JSON.parse(t);
+        const c = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+        if (c) return String(c).trim().replace(/^"|"$/g, "");
+      } catch {}
+      if (!t.startsWith("{")) return t.replace(/^"|"$/g, "");
+    }
   } catch {}
   try {
     const r = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(prompt)}&langpair=ar|en`);
