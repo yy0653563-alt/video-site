@@ -10,6 +10,8 @@ const MAGIC_HOUR_API_KEY = process.env.MAGIC_HOUR_API_KEY || "";
 const MAGIC_HOUR_BASE = process.env.MAGIC_HOUR_BASE_URL || "https://api.magichour.ai";
 const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY || "";
 const DASHSCOPE_BASE = process.env.DASHSCOPE_BASE_URL || "https://ap-southeast-1.maas.qwencloudapi.com/api/v1";
+const LTX_API_KEY = process.env.LTX_API_KEY || "";
+const LTX_BASE = process.env.LTX_BASE_URL || "https://ltx-2api.com";
 const mediaStore = new Map();
 const mediaErrors = new Map();
 const mediaPending = new Set();
@@ -118,6 +120,18 @@ async function dashscope(path, options = {}) {
   let json = null;
   try { json = JSON.parse(text); } catch {}
   if (!res.ok) throw new Error(`DashScope ${res.status}: ${json?.message || json?.code || text.slice(0, 160)}`);
+  return json;
+}
+
+async function ltx(path, options = {}) {
+  const res = await fetch(LTX_BASE + path, {
+    ...options,
+    headers: { Authorization: `Bearer ${LTX_API_KEY}`, "Content-Type": "application/json", ...(options.headers || {}) },
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch {}
+  if (!res.ok) throw new Error(`LTX ${res.status}: ${json?.message || json?.error || text.slice(0, 160)}`);
   return json;
 }
 
@@ -280,7 +294,7 @@ $("go").onclick = async () => {
     const r = await fetch("/api/video", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, aspect: $("aspect").value, seconds: $("seconds").value, imageData }) });
     const j = await r.json();
     if (!j.videoId) throw new Error(j.error || "تعذر بدء التوليد.");
-    $("status").textContent = j.videoId.startsWith("ds-") ? "يولّد الآن عبر Qwen…" : j.videoId.startsWith("mh-") ? "يولّد الآن عبر Magic Hour…" : j.videoId.startsWith("polli-") ? "يولّد الآن عبر Pollinations…" : "يولّد الآن عبر Agnes…";
+    $("status").textContent = j.videoId.startsWith("ds-") ? "يولّد الآن عبر Qwen…" : j.videoId.startsWith("ltx-") ? "يولّد الآن عبر LTX…" : j.videoId.startsWith("mh-") ? "يولّد الآن عبر Magic Hour…" : j.videoId.startsWith("polli-") ? "يولّد الآن عبر Pollinations…" : "يولّد الآن عبر Agnes…";
     const url = await poll(j.videoId);
     $("out").src = url;
     $("out").style.display = "block";
@@ -381,7 +395,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/health") {
-      sendJson(res, 200, { ok: true, keySet: Boolean(AGNES_API_KEY), pollinationsKeySet: Boolean(POLLINATIONS_API_KEY), magicHourKeySet: Boolean(MAGIC_HOUR_API_KEY), dashscopeKeySet: Boolean(DASHSCOPE_API_KEY) });
+      sendJson(res, 200, { ok: true, keySet: Boolean(AGNES_API_KEY), pollinationsKeySet: Boolean(POLLINATIONS_API_KEY), magicHourKeySet: Boolean(MAGIC_HOUR_API_KEY), dashscopeKeySet: Boolean(DASHSCOPE_API_KEY), ltxKeySet: Boolean(LTX_API_KEY) });
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/image") {
@@ -510,6 +524,20 @@ const server = http.createServer(async (req, res) => {
             if (taskId) return sendJson(res, 200, { videoId: "ds-" + taskId });
           } catch {}
         }
+        if (LTX_API_KEY) {
+          try {
+            const uploadId = "imgup-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8) + "." + ext;
+            mediaStore.set(uploadId, { bytes, type: "image/" + (ext === "jpg" ? "jpeg" : ext) });
+            while (mediaStore.size > 8) mediaStore.delete(mediaStore.keys().next().value);
+            const imageUrl = `https://${req.headers.host}/api/media/${encodeURIComponent(uploadId)}`;
+            const lt = await ltx("/api/generate", {
+              method: "POST",
+              body: JSON.stringify({ prompt: prompt || "Animate this image naturally with gentle motion", image: imageUrl, resolution: "480p", duration: Math.min(20, Math.max(5, secondsNum)) }),
+            });
+            const taskId = lt?.task_id || lt?.id || lt?.data?.task_id || lt?.data?.id;
+            if (taskId) return sendJson(res, 200, { videoId: "ltx-" + taskId });
+          } catch {}
+        }
         if (!MAGIC_HOUR_API_KEY) return sendJson(res, 200, { error: "تحريك الصور غير مهيأ حالياً." });
         const up = await magicHour("/v1/files/upload-urls", { method: "POST", body: JSON.stringify({ items: [{ type: "image", extension: ext }] }) });
         const item = up?.items?.[0];
@@ -611,6 +639,15 @@ const server = http.createServer(async (req, res) => {
         const videoUrl = st?.output?.video_url || st?.video_url;
         if (status === "SUCCEEDED" && videoUrl) return sendJson(res, 200, { url: videoUrl });
         if (status === "FAILED" || status === "CANCELED") return sendJson(res, 200, { error: "فشل التوليد. حاول مجددًا." });
+        return sendJson(res, 200, { status: status ? status.toLowerCase() : "pending" });
+      }
+      if (id.startsWith("ltx-")) {
+        const st = await ltx(`/api/status?task_id=${encodeURIComponent(id.slice(4))}`);
+        const status = String(st?.status || st?.data?.status || "").toUpperCase();
+        const first = Array.isArray(st?.response) ? st.response[0] : null;
+        const videoUrl = (typeof first === "string" ? first : first?.url) || st?.video_url || st?.data?.video_url;
+        if (status === "SUCCESS" && videoUrl) return sendJson(res, 200, { url: videoUrl });
+        if (status === "FAILED") return sendJson(res, 200, { error: "فشل التوليد. حاول مجددًا." });
         return sendJson(res, 200, { status: status ? status.toLowerCase() : "pending" });
       }
       if (id.startsWith("mh-")) {
