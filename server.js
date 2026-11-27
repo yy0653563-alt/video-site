@@ -30,6 +30,17 @@ function readBody(req) {
 async function translatePrompt(prompt) {
   if (!/[\u0600-\u06FF]/.test(prompt)) return prompt;
   try {
+    const r = await fetch("https://apihub.agnes-ai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${AGNES_API_KEY}` },
+      body: JSON.stringify({ model: "agnes-1.5-flash", messages: [{ role: "user", content: "Translate this Arabic image prompt to English. Reply with the English translation only, no quotes, no explanation: " + prompt }] }),
+      signal: AbortSignal.timeout(30000),
+    });
+    const j = await r.json().catch(() => null);
+    const c = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+    if (r.ok && c) return String(c).trim().replace(/^"|"$/g, "");
+  } catch {}
+  try {
     const r = await fetch(`${POLLINATIONS_BASE}/text/${encodeURIComponent("Translate to English, output only the translation: " + prompt)}?model=openai`, {
       headers: POLLINATIONS_API_KEY ? { Authorization: `Bearer ${POLLINATIONS_API_KEY}` } : {},
     });
