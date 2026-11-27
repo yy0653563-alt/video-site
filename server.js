@@ -465,12 +465,14 @@ const server = http.createServer(async (req, res) => {
         const ext = m[1].toLowerCase().replace("jpeg", "jpg");
         const bytes = Buffer.from(m[2], "base64");
         if (AGNES_API_KEY) {
-          const uploadId = "imgup-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+          const uploadId = "imgup-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8) + "." + ext;
           mediaStore.set(uploadId, { bytes, type: "image/" + (ext === "jpg" ? "jpeg" : ext) });
           while (mediaStore.size > 8) mediaStore.delete(mediaStore.keys().next().value);
           const imageUrl = `https://${req.headers.host}/api/media/${encodeURIComponent(uploadId)}`;
           const agnesPrompt = prompt || "Animate this image naturally with gentle motion";
           const payloads = [
+            { model: "agnes-video-v2.0", prompt: agnesPrompt, image: imageUrl, num_frames: 121, frame_rate: 24 },
+            { model: "agnes-video-v2.0", prompt: agnesPrompt, image: imageData, num_frames: 121, frame_rate: 24 },
             { model: MODEL, prompt: agnesPrompt, image: imageUrl, size: "720P", aspect_ratio: aspect, seconds, n: 1 },
             { model: MODEL, prompt: agnesPrompt, image: imageData, size: "720P", aspect_ratio: aspect, seconds, n: 1 },
             { model: MODEL, prompt: agnesPrompt, mode: "ti2vid", image: imageUrl, num_frames: 121, frame_rate: 24 },
@@ -588,7 +590,11 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { status: status || "pending" });
       }
       if (!AGNES_API_KEY) return sendJson(res, 200, { error: "توليد الفيديو غير مهيأ." });
-      const st = await agnes(`/agnesapi?video_id=${encodeURIComponent(id)}&model_name=${encodeURIComponent(MODEL)}`);
+      let st = null;
+      for (const path of [`/agnesapi?video_id=${encodeURIComponent(id)}&model_name=${encodeURIComponent(MODEL)}`, `/agnesapi?video_id=${encodeURIComponent(id)}`, `/agnesapi?video_id=${encodeURIComponent(id)}&model_name=agnes-video-v2.0`]) {
+        try { st = await agnes(path); break; } catch {}
+      }
+      if (!st) return sendJson(res, 200, { status: "pending" });
       const videoUrl = st?.metadata?.url || st?.url || st?.data?.url || st?.video_url;
       if (videoUrl) return sendJson(res, 200, { url: videoUrl });
       const status = String(st?.status || st?.data?.status || "").toLowerCase();
