@@ -111,7 +111,7 @@ function friendlyError(err) {
   const m = String(err?.message || err);
   if (m.includes("401") || m.includes("Token")) return "مفتاح التوليد غير صالح أو غير مضبوط.";
   if (m.includes("429") || m.includes("503") || m.includes("queue")) return "طابور التوليد ممتلئ حالياً. جرّب بعد قليل.";
-  if (m.includes("402")) return "انتهى رصيد التوليد المجاني حالياً.";
+  if (m.includes("402")) return "رصيد الخدمة الاحتياطية لا يكفي لهذه المحاولة. جرّب مدة أقصر أو بعد قليل.";
   return "تعذر توليد الفيديو الآن. حاول مجددًا.";
 }
 
@@ -408,13 +408,32 @@ const server = http.createServer(async (req, res) => {
       const host = req.headers.host || "video-site-8teq.onrender.com";
       const srcUrl = `https://${host}/api/media/${encodeURIComponent(srcId)}`;
       const imagePrompt = await translatePrompt(prompt);
-      const imgRes = await fetch(`${POLLINATIONS_BASE}/image/${encodeURIComponent(imagePrompt)}?model=flux&image=${encodeURIComponent(srcUrl)}`, {
-        headers: POLLINATIONS_API_KEY ? { Authorization: `Bearer ${POLLINATIONS_API_KEY}` } : {},
-      });
-      if (!imgRes.ok) return sendJson(res, 200, { error: "تعذر تعديل الصورة الآن. حاول مجددًا." });
-      const type = imgRes.headers.get("content-type") || "image/jpeg";
-      if (!type.includes("image")) return sendJson(res, 200, { error: "تعذر تعديل الصورة الآن. حاول مجددًا." });
-      const bytes = Buffer.from(await imgRes.arrayBuffer());
+      let bytes = null;
+      let type = "image/jpeg";
+      try {
+        const ar = await fetch("https://apihub.agnes-ai.com/v1/images/generations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${AGNES_API_KEY}` },
+          body: JSON.stringify({ model: "agnes-image-2.1-flash", prompt: imagePrompt, size: "1K", image: [imageData], extra_body: { response_format: "url" } }),
+          signal: AbortSignal.timeout(120000),
+        });
+        const aj = await ar.json().catch(() => null);
+        const d = aj && aj.data && aj.data[0];
+        if (ar.ok && d && d.b64_json) { bytes = Buffer.from(d.b64_json, "base64"); type = "image/png"; }
+        else if (ar.ok && d && d.url) {
+          const ir = await fetch(d.url, { signal: AbortSignal.timeout(60000) });
+          if (ir.ok) { bytes = Buffer.from(await ir.arrayBuffer()); type = ir.headers.get("content-type") || "image/png"; }
+        }
+      } catch {}
+      if (!bytes) {
+        const imgRes = await fetch(`${POLLINATIONS_BASE}/image/${encodeURIComponent(imagePrompt)}?model=flux&image=${encodeURIComponent(srcUrl)}`, {
+          headers: POLLINATIONS_API_KEY ? { Authorization: `Bearer ${POLLINATIONS_API_KEY}` } : {},
+        });
+        if (!imgRes.ok) return sendJson(res, 200, { error: "تعذر تعديل الصورة الآن. حاول مجددًا." });
+        type = imgRes.headers.get("content-type") || "image/jpeg";
+        if (!type.includes("image")) return sendJson(res, 200, { error: "تعذر تعديل الصورة الآن. حاول مجددًا." });
+        bytes = Buffer.from(await imgRes.arrayBuffer());
+      }
       const mediaId = "img-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
       mediaStore.set(mediaId, { bytes, type });
       while (mediaStore.size > 8) mediaStore.delete(mediaStore.keys().next().value);
@@ -475,6 +494,19 @@ const server = http.createServer(async (req, res) => {
             if (mh?.id) return sendJson(res, 200, { videoId: "mh-" + mh.id });
           } catch (err) {
             lastErr = err;
+            const em = String(err?.message || err).toLowerCase();
+            if ((em.includes("402") || em.includes("credit") || em.includes("insufficient")) && secondsNum > 4) {
+              try {
+                const mhAspect = ["16:9", "9:16", "1:1"].includes(aspect) ? aspect : "16:9";
+                const mh = await magicHour("/v1/text-to-video", {
+                  method: "POST",
+                  body: JSON.stringify({ end_seconds: 4, style: { prompt }, aspect_ratio: mhAspect, model: "ltx-2.5", resolution: "480p", audio: true }),
+                });
+                if (mh?.id) return sendJson(res, 200, { videoId: "mh-" + mh.id });
+              } catch (err2) {
+                lastErr = err2;
+              }
+            }
           }
         }
         if (POLLINATIONS_API_KEY) {
